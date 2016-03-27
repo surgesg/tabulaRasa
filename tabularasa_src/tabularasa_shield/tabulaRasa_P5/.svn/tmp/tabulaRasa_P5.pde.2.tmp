@@ -1,0 +1,191 @@
+// added comment
+// added color slot buttons
+// problem with slot one fixed
+// merged data files into one & added file browser
+// added sample mode
+// added harmonic mode
+// added clear button 11/21
+// added labels at bottom of harmonics screen  11/30
+import ddf.minim.*;
+import ddf.minim.signals.*;
+import ddf.minim.analysis.*;
+import ddf.minim.effects.*;
+
+import toxi.math.*;
+import controlP5.*;
+
+ControlP5 controlP5;
+  //sliders
+Slider sliders[]= new Slider[16];
+int sliderData[] = new int[16 * 32];  //save for recall
+int sliderValue = 100;
+String sliderName;
+  //buttons
+String buttonName;
+Button buttons[]= new Button[33];  //Memory slots
+Button write, read, clear;
+Button interpControls[] = new Button[8];  //interpolation types
+  //labels
+String labelName;
+  //interpolation
+String interpNames[] = new String[] {"Linear", "Sigmoid", "Cosine", "Circular", "Exponential", "Decimated", "Load Sample", "Harmonics"};
+int interpType = 0;
+int slotInterp[] = new int[33];  //save for recall
+  //files
+byte data[] = new byte[256];
+byte file[] = new byte[(256 * 32) + 33 + (16 *32) + 33];  //save for Arduino
+int start_slotInterp = 256 * 32;
+int start_slotStatus = start_slotInterp + 33;
+int start_sliderData = start_slotStatus + 33;
+  //misc
+int currentSlot, previousSlot;
+boolean slotStatus[] = new boolean[33];  //has button been used?
+int rtClick = 0;
+  // interpolation 
+InterpolateStrategy sigInterp = new SigmoidInterpolation(0.9);
+InterpolateStrategy cosineInterp = new CosineInterpolation();
+InterpolateStrategy circularInterp = new CircularInterpolation();
+InterpolateStrategy exponentialInterp = new ExponentialInterpolation();
+InterpolateStrategy decimatedInterp = new DecimatedInterpolation(4);
+  // audio playback
+Minim minim;
+AudioSample sample;
+AudioSample currentSound;
+AudioOutput out;
+TableOsc osc; // extended oscillator class
+boolean changedSamples = false; // used to reconvert bytes to floats, only when needed
+boolean audioOn = false; // to be used for switching
+PImage speaker;
+
+void setup() {
+  size(530, 420);
+  background(0, 20, 50);
+  smooth();
+//--------------------------------------------------
+//initialize sound
+  minim = new Minim(this);
+  out = minim.getLineOut(Minim.MONO, 512, 8000, 8); // modified buffer size for less latency, sample rate and bit depth for matching Arduino
+  osc = new TableOsc(200, 0.5, out.sampleRate());
+  out.addSignal(osc);
+  speaker = loadImage("speaker.png"); // load speaker icon
+  speaker.resize(40, 40);
+//--------------------------------------------------
+//initalize arrays
+  for(int i = 0; i < (16 * 32); ++i) {  //offset for sliders
+    sliderData[i] = 127;
+  }
+  for(int i = 0; i < (256 * 32); ++i) {  //clear memory slots
+    file[i] = 0;
+  }
+  for(int i = 0;i < 33; ++i) {  //no buttons pushed
+    slotStatus[i] = false;
+  }
+//--------------------------------------------------
+//control setup:
+//--------------------------------------------------
+  controlP5 = new ControlP5(this);
+  controlP5.setAutoDraw(false);
+//--------------------------------------------------
+//Control Ids:
+//memory slots (1-32)
+//interpolation (33-40)
+//sliders (41-57)
+//clear (58)
+//--------------------------------------------------
+//make first bank of memory slot buttons Ids (0-16) zero not used
+  for(int num =1;num < 17;num++) {  //make button control array
+    buttonName = "Slot_" + Integer.toString(num);
+    controlP5.addButton(buttonName, num, 410, num*20+30, 50, 10).setId(num);
+    buttons[num] = (Button)controlP5.controller(buttonName);
+    buttons[num].setColorActive(color(255,0,0));
+  }
+//--------------------------------------------------
+//make second bank of memory slot buttons Ids (17-32)
+  for(int num =17;num < 33;num++) {  //make second bank
+    buttonName = "Slot_" + Integer.toString(num);
+    controlP5.addButton(buttonName, num, 470, num%17 *20+50, 50, 10).setId(num);
+    buttons[num] = (Button)controlP5.controller(buttonName);
+    buttons[num].setColorActive(color(255,0,0));
+  }
+//--------------------------------------------------
+//make interpolation buttons Ids (33-40)
+  for(int num = 0; num < 8; ++num) {
+    buttonName = interpNames[num];
+    controlP5.addButton(buttonName, 0, num * 67, 405, 67, 10).setId(num + 33); 
+    interpControls[num] = (Button)controlP5.controller(buttonName);
+//    interpControls[num].setColorActive(color(255,0,0));
+  }
+//--------------------------------------------------
+//make slider controls Ids (41-57)
+  for(int num = 0;num < 16; num ++) {  //make slider control array
+    sliderName = "Slider_" + Integer.toString(num); 
+    controlP5.addSlider(sliderName,0, 255, num*25, 0, 25, 400).setId(num + 41);
+    sliders[num] = (Slider)controlP5.controller(sliderName);  //build array
+    sliders[num].setSliderMode(Slider.FLEXIBLE);  //set properties
+    sliders[num].setLabelVisible(false);
+    sliders[num].setValue(127);
+    sliders[num].setColorBackground(color(0, 0, 20));
+    sliders[num].setColorForeground(color(100, 0, 20));
+  }
+//--------------------------------------------------
+//make read, write, clear buttons -- clear Id (58)
+  write = controlP5.addButton("write", 0, 470, 30, 50, 10);
+  read = controlP5.addButton("read", 0, 410, 30, 50, 10);  
+  controlP5.addButton("clear", 0, 410, 10, 50, 10).setId(58);  
+  clear = (Button)controlP5.controller("clear");
+//--------------------------------------------------
+//set initial conditions
+  currentSlot = 1;
+  previousSlot = 0;
+  slotStatus[currentSlot] = true;
+  highlightMem();  //highlight initial slot
+}
+
+void draw() {
+  if(currentSlot != previousSlot) { // load previous values from memory
+    loadMemory();
+    highlightMem();  //highlight current slot
+    drawShape();
+  }
+  previousSlot = currentSlot;
+  controlP5.draw();
+  generalInterp();  //interpolate
+  highlightInterp();
+  drawShape();
+  drawSpeakerIcon();
+  makeSound(data);
+}
+
+void drawShape() {
+  int yCoord, nextYCoord;
+  stroke(255);
+  fill(255);
+  for(int i = 0; i < 255; ++i) {
+    fill(255);
+    yCoord = data[i];
+    nextYCoord = data[(i + 1) % 256];
+    if(yCoord < 0) {
+      yCoord += 256;
+    }
+    if(nextYCoord < 0) {
+      nextYCoord += 256;
+    }
+    yCoord = (int)map(yCoord, 255, 0, 0, 400);
+    nextYCoord = (int)map(nextYCoord, 255, 0, 0, 400);
+    line(i * (400.0 / 256.0), yCoord, ((i + 1) * (400.0 / 256.0)), nextYCoord);
+  }
+}
+
+void loadMemory() {
+  for(int i = 0; i < 16; ++i) {
+    sliders[i].setValue(sliderData[i + (16 * (currentSlot - 1))]);
+  }
+}
+
+//void mousePressed() {
+//  if (mouseButton == RIGHT) {
+//        sliderData[16 * (currentSlot-1) + rtClick-1]=255;
+//println(currentSlot);
+//loadMemory();
+//  } 
+//}
